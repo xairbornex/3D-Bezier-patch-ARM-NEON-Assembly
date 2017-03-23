@@ -1,0 +1,1522 @@
+REM Raspberry Pi 3D engine in full assembly language, by Ruben Sicking 2016
+REM
+REM Initial input are objects with their specific features and coordinates
+REM Realtime input is change of objects (transpose, scale, rotate, if applicable control points {bezier})
+REM Output for this version is realtime wireframe image on screen
+REM
+REM Program is written in assembly language with the least possible use of OS calls for portability purposes
+REM The only thing that uses the RISCOS is the initial DIM of the memory, the address fetch of the screen and
+REM the setup of the Floating Point context
+REM
+REM The program uses the ARM1176JZF-S processor and the VFP processors
+REM It does not involve direct accessing and use of VidCore IV
+REM
+REM
+REM   *****************************************************************************************************
+REM
+REM Memory
+REM
+REM To avoid OS specific calls in the assembly the memory use for the program is done by defining one block only
+REM and defining the index list to refer to the various data and variables needed for the program
+REM Underneath is a discription of that memory block and the protocol used for objects
+REM
+
+
+MODE 1280,720,32
+COLOUR 255,0,40
+
+max=5
+DIM code% &2000
+DIM stack% &1000
+DIM block% 1000000
+
+                        :REM Start of Memory Block
+                        :REM variables definied are address offsets
+                        :REM
+
+                        :REM General data
+screen_address_0=0      :REM &0000-&0003         Pointer to Screen0 buffer
+screen_address_1=4      :REM &0004-&0007         Pointer to Screen1 buffer
+screen_x=8              :REM &0008-&000B         x-screen resolution
+screen_y=12             :REM &000C-&000F         y-screen resolution
+x_init=16               :REM &0010-&0013         x_init  --> value to use for plotting to screen
+y_init=20               :REM &0014-&0017         y_init  --> value to use for plotting to screen
+fb_size=24              :REM &0018-&001B         frame buffer size  (=2x screenbuffer)
+vfp_buffer=28           :REM &001C-&001F         pointer to vfp buffer
+vfp_size=32             :REM &0020-&0023         vfp size needed
+vfp_context=36          :REM &0024-&0027         vfp context handle
+sine=40                 :REM &0028-&002B         pointer to sine table
+cosine=44:              :REM &002C-&002F         pointer to cosine table
+
+                        :REM Initial Camera  data
+camera_angle_a=48:      :REM &0030-&003B         Camera Angles  a,b,c
+camera_angle_b=52
+camera_angle_c=56
+camera_distance=60      :REM &003C-&003F         Camera Distance W
+camera_x=64             :REM &0040-&004B         Camera Position CX,CY,CZ
+camera_y=68
+camera_z=72
+camera_lookat_x=76      :REM &004C-&0057         Camera look at position LX,LY,LZ
+camera_lookat_y=80
+camera_lookat_x=84
+camera_zoom_factor=88   :REM &0058-&005B         Zoom factor  F
+active_screen_address=92:REM either same as screen_address_0 or as screen_address_1
+triangle_vertices=96    :REM &005C-&008B         48 bytes of which 3 x X,Y + 3 x tangient
+
+
+                         :REM Object list data
+number_of_objects=256    :REM &0100-&0103         Number of objects
+first_free_space=260     :REM &0104-&0107         Block% Offset pointer to first available free space
+first_object_address=264 :REM &0108-&010B         Block% Offset pointer to first object Data
+                         :REM &010C-&010F         Block% Offset pointer to second Object Data
+                         :REM ...........         .......... ..........
+                         :REM &02FC-&02FF         Pointer to last Object Data
+
+bezier_resolution=&300  :REM                     Global Bezier resolution n, as exponent 2^n
+                        :REM General Variables space
+Buv_ij=&400             :REM &0400-&0419         Bezier patch temperary values for Bu(i) and Bv(j)
+matrices=&500           :REM &0500-&056B         Space for 3 3x3 matrices (rotation)
+vfp=&1000               :REM &1000-&11FF         vfp buffer
+sin=&1400               :REM &1400-&1FFF         sine table
+cos=&2000               :REM &2000-&2BFF         cosine table
+Buv=&2C00               :REM &2C00-              Bezier Bu,Bv temp space (resolution+1)*4 cells of 4 bytes
+
+
+
+                        :REM Object Data (at Block offset to be determined)
+                        :REM offset from 'Pointer to Object'
+                        :REM
+number_of_vertices=0    :REM &0000-&0003         number of vertices
+first_vertex=4          :REM &0004-&0007         Offset to first vertex
+object_type=8           :REM &0008-&000B         Object type
+object_resolution=12    :REM &000C-&000F         Object resolution
+object_color=16         :REM &0010-&0013         Object color
+transpose_x=20          :REM &0014-&0017         Transpose X
+transpose_y=24          :REM &0018-&001B         Transpose Y
+transpose_z=28          :REM &001C-&001F         Transpose Z
+rotation_point_x=32     :REM &0020-&0023         Object rotation point X
+rotation_point_y=36     :REM &0024-&0027         Object rotation point Y
+rotation_point_z=40     :REM &0028-&002B         Object rotation point Z
+scale_point_x=44        :REM &002C-&002F         Object scale point X
+scale_point_y=48        :REM &0030-&0033         Object scale point Y
+scale_point_z=52        :REM &0034-&0037         Object scale point Z
+scale_factor_x=56       :REM &0038-&003B         Object scale X-factor
+scale_factor_y=60       :REM &003C-&003F         Object scale Y-factor
+scale_factor_z=64       :REM &0040-&0043         Object scale Z-factor
+rotation_x=68           :REM &0044-&0047         Object rotation angle X-axis
+rotation_y=72           :REM &0048-&004B         Object rotation angle Y-axis
+rotation_z=76           :REM &004C-&004F         Object rotation angle Z-axis
+changed_object_data=80  :REM &0050-&0053         Pointer to transposed,scaled and rotated object vertices
+changed_view_data=84    :REM &0054-&0057         Pointer to rotated view vertices
+object_screen_data=88   :REM &0058-&005B         Pointer to screen coordinates + Z-value
+                            :REM
+                            :REM Object type Bezier Patch (=1)
+bezier_control_points=&5C   :REM &005C-&015B Control Points X(i,j),Y(i,j),Z(i,j)
+                            :REM &0160-&0177 temp values related to bezier_points!
+bezier_points=&178          :REM &0178-      actual points
+bezier_handled_points=-1      : REM depends on resolution of Bezier
+bezier_rotated_view_points=-1 : REM depends on resolution of Bezier
+bezier_screen_data=-1         : REM depends on resolution of Bezier
+REM make sin and cos tables in memory
+
+FOR a=0 TO 719
+  sine%=block%+(sin)+(a<<2)
+  cosine%=block%+(cos)+(a<<2)
+  !sine%  =SIN(RAD(.5*a))*256
+  !cosine%=COS(RAD(.5*a))*256
+NEXT
+
+
+REM =======================================================================================
+REM ================================================START==================================
+REM =======================================================================================
+
+!(block%+(first_object_address))=&3000
+
+REM ====================================================
+REM Defining initial camera parameters
+REM ====================================================
+
+READ a,b,c,d,e,f,g,h,i,j,k
+
+!(block%+(camera_angle_a))=720-a
+!(block%+(camera_angle_b))=720-b
+!(block%+(camera_angle_c))=c
+!(block%+(camera_distance))=d
+!(block%+(camera_x))=e
+!(block%+(camera_y))=f
+!(block%+(camera_z))=g
+!(block%+(camera_lookat_x))=h
+!(block%+(camera_lookat_y))=i
+!(block%+(camera_lookat_x))=j
+!(block%+(camera_zoom_factor))=k
+
+DATA 70,110,0
+DATA 16000
+DATA 0,0,0
+DATA 0,0,0
+DATA 356
+
+!(block%+bezier_resolution)=4
+REM ===================================================
+
+REM =================================================
+REM Defining Objects, whatever the method. For now just 1 Bezier patch
+REM =================================================
+
+!(block%+(number_of_objects))=1                         :REM just make total objects for now 1
+object_number=0                                            :REM thus this object is nr 0
+
+address=block%+!(block%+((first_object_address+object_number)))
+!(address+(object_type))=255                            :REM bezier is type 255....
+z=!(block%+bezier_resolution)
+!(address+(object_resolution))=z
+nr=((2^z)+1)^2
+!(address+(number_of_vertices))=nr                              :REM total nr of bezier vertices, depending on resolution z
+bezier_handled_points=bezier_points+(nr*3)                      :REM address<<2 of handled bezier points
+tempvalue=INT(LOG(bezier_handled_points)/.301)
+tempvalue=tempvalue+2
+bezier_handled_points=2^tempvalue
+bezier_rotated_view_points=bezier_handled_points+2^tempvalue    :REM address<<2 of bezier points after camera change
+bezier_screen_data=bezier_rotated_view_points+2^tempvalue
+!(address+(first_free_space))=bezier_screen_data+2^tempvalue    :REM store first free space address
+
+address_control_points=address+bezier_control_points            :REM get 16 Bezier controlpoints X,Y,Z --> 48 values
+FOR A%=0 TO 3
+ FOR B%=0 TO 3
+  READ PX%,PY%,PZ%
+  !(address_control_points+B%*16+A%*4)=PX%*16                 :REM all X sequential
+  !(address_control_points+B%*16+A%*4+64)=PY%*16              :REM then all Y
+  !(address_control_points+B%*16+A%*4+128)=PZ%*16             :REM then all Z
+ NEXT
+NEXT
+
+address_object_color=address+(object_color)             :
+READ color
+!address_object_color=color                                :REM bezier color
+
+REM Bezier control points  x's, y's and z's
+DATA -1000,0,-1000,    -500,0,-1000,       500,0,-1000,    1000,0,-1000
+DATA -1000,0,-500,     -500,3000,-500,     500,0,-500,   1000,0,-500
+DATA -1000,0,500,      -500,0,500,    500,-3000,500,  1000,0,500
+DATA -1000,0,1000,     -500,0,1000,    500,0,1000,  1000,0,1000
+
+REM Bezier color
+DATA &FF8000
+
+REM ===================================================
+REM End of defining objects
+REM =====================================================
+
+
+
+
+
+
+
+
+REM =============================================================
+REM Start Assembly
+REM ============================================================
+
+FOR pass=0 TO 2 STEP 2
+P%=code%
+[
+OPT pass
+.start
+MOV R12,R0                         ; use R12 forever as start memory block
+MOV R11,R1                         ; use R11 as stackpointer
+
+;;;;;;;;;;;;;;;;;; screen initiation ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+MOV R2,#&500                       ; 1280 x resolution
+STR R2,[R12,#screen_x]          ; store in screen_x
+MOV R2,#&200                       ; 720 y resolution
+ADD R2,R2,#&D0                     ; store in screen_y
+STR R2,[R12,#screen_y]
+
+MOV R4,#9                          ; apparently these are the values for gettting
+MOV R9,#&2A                        ; the screen address?
+SWI "OS_CallAVector"               ; the purpose of this call is to call a vector directly.
+MOV R5,R0                          ; save Framestore physical base address.
+STR R1,[R12,#fb_size]           ; save Framestore Size.
+
+MOV R0,#&200                       ; Set bit 17 (flag to doubly map)
+ORR R0,R0,#13                      ; Reason Code "Map in IO permenent"
+MOV R2,R1                          ; Set R2 TO the returned size.
+MOV R1,R5                          ; Physical address to map in.
+SWI "OS_Memory"                    ; The purpose of this call is to perform verioous
+                                   ; operations for memory management.
+STR R3,[R12,#screen_address_0]  ; Save pointer TO mapped area (bank 0)
+
+LDR R4,[R12,#fb_size]
+ADD R3,R3,R4,LSR #1
+STR R3,[R12,#screen_address_1]  ;add screenbuffer/2 and make screen1 bank 1
+
+LDR R2,[R12,#screen_x]
+MOV R2,R2,LSL #2                   ; we only need 4 *  x (4 bytes per pixel)
+STR R2,[R12,#x_init]
+LDR R3,[R12,#screen_y]
+MOV R3,R3,LSR #1                   ; we only need half y (center of screen, so +/- 1/2 y)
+STR R3,[R12,#y_init]
+
+;;;;;;;;;;;;;;;;;; floating point set up ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+MOV R0, #2
+MOV R1, #16                        ; number of Double registers
+SWI "VFPSupport_CheckContext"
+STR R0,[R12,#vfp_size]
+MOV R0, #1<<31
+ORR R0, R0, #2
+MOV R1,#16                         ; number of Double registers
+ADD R2,R12,#vfp                 ; vfp buffer
+MOV R3, #%11<<24                   ; in the book it is <<25..?
+SWI "VFPSupport_CreateContext"
+STR R0,[R12,#vfp_context]       ; save context pointer
+
+;;;;;;;;;;;;;;;;; set up B(t) table for Bezier ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+LDR R8,[R12,#bezier_resolution] ; max resolution for Beziers used
+RSB R6,R8,#max
+ADD R6,R6,R6,LSL #1
+;MOV R6,#0
+
+MOV R0,#1
+MOV R8,R0,LSL R8                ; R8 is 2^D%, the resolution of the patch
+ADD R7,R12,#Buv                 ; R7 is address space to hold B(t) values
+STR R8,temp7
+
+MOV R1,#0
+;;.t_0
+
+MUL R2,R8,R8
+MUL R2,R8,R2
+MOV R2,R2,LSL R6
+MOV R3,#0
+MOV R4,#0
+MOV R5,#0
+
+STR R2,[R7],#4                 ; the build up of the table needs explanation.
+STR R2,[R7],#4                 ; in order to calculate 4 points at a time, we need a sequence
+STR R2,[R7],#4                 ; of (1-)t^3 for t, t+1,t+2,t+3 followed by
+STR R2,[R7],#4                 ; 3*t*(1-t)^2 for t, t+1, t+2, t+3 followed by
+STR R3,[R7],#4                 ; 3*t^2*(1-t) for t, t+1, t+2, t+3 followed by
+STR R3,[R7],#4                 ; t^3 for t, t+1, t+2, t+3.
+STR R3,[R7],#4                 ; however, for t=0, 4  copies of the above values are made at the start of the table
+STR R3,[R7],#4                 ; eventually, there are n+1 values. the first is where t=0
+STR R4,[R7],#4                 ;
+STR R4,[R7],#4                 ; when using the table for calculating the bezier points, it goes from
+STR R4,[R7],#4                 ; high to low. So first for t=61,62,63 and 64. Then t=57,58,59 and 60
+STR R4,[R7],#4                 ; once t=1, 2, 3 and 4 are reached, a special line is used for t=0
+STR R5,[R7],#4
+STR R5,[R7],#4
+STR R5,[R7],#4
+STR R5,[R7],#4
+
+
+ADD R1,R1,#1
+.Buv_loop
+   SUB R10,R8,R1               ; R10=(1-t)
+   MUL R4,R10,R1               ; R4=(1-t)*t
+   MUL R4,R1,R4                ; R4=(1-t)*t^2
+   ADD R4,R4,R4,LSL#1          ; R4=3*(1-t)*t^2
+   MUL R3,R10,R10              ; R3=(1-t)^2
+   MUL R2,R3,R10               ; R2=(1-t)^3
+   MUL R3,R1,R3                ; R3=t*(1-t)^2
+   ADD R3,R3,R3,LSL #1         ; R3=3*t*(1-t)^2
+   MUL R5,R1,R1
+   MUL R5,R1,R5                ; R5=t^3
+
+   MOV R2,R2,LSL R6            ; make sure absolute values are same regardless of bezier resolution
+   MOV R3,R3,LSL R6
+   MOV R4,R4,LSL R6
+   MOV R5,R5,LSL R6
+
+   STR R2,[R7]
+   STR R3,[R7,#16]
+   STR R4,[R7,#32]
+   STR R5,[R7,#48]
+
+   ADD R7,R7,#4
+   ADD R1,R1,#1
+
+   SUB R10,R8,R1               ; R10=(1-t)
+   MUL R4,R10,R1               ; R4=(1-t)*t
+   MUL R4,R1,R4                ; R4=(1-t)*t^2
+   ADD R4,R4,R4,LSL#1          ; R4=3*(1-t)*t^2
+   MUL R3,R10,R10              ; R3=(1-t)^2
+   MUL R2,R3,R10               ; R2=(1-t)^3
+   MUL R3,R1,R3                ; R3=t*(1-t)^2
+   ADD R3,R3,R3,LSL #1         ; R3=3*t*(1-t)^2
+   MUL R5,R1,R1
+   MUL R5,R1,R5                ; R5=t^3
+   ;
+   MOV R2,R2,LSL R6            ; make sure absolute values are same regardless of bezier resolution
+   MOV R3,R3,LSL R6
+   MOV R4,R4,LSL R6
+   MOV R5,R5,LSL R6
+
+   STR R2,[R7]
+   STR R3,[R7,#16]
+   STR R4,[R7,#32]
+   STR R5,[R7,#48]
+
+   ADD R7,R7,#4
+   ADD R1,R1,#1
+
+   SUB R10,R8,R1               ; R10=(1-t)
+   MUL R4,R10,R1               ; R4=(1-t)*t
+   MUL R4,R1,R4                ; R4=(1-t)*t^2
+   ADD R4,R4,R4,LSL#1          ; R4=3*(1-t)*t^2
+   MUL R3,R10,R10              ; R3=(1-t)^2
+   MUL R2,R3,R10               ; R2=(1-t)^3
+   MUL R3,R1,R3                ; R3=t*(1-t)^2
+   ADD R3,R3,R3,LSL #1         ; R3=3*t*(1-t)^2
+   MUL R5,R1,R1
+   MUL R5,R1,R5                ; R5=t^3
+
+   MOV R2,R2,LSL R6            ; make sure absolute values are same regardless of bezier resolution
+   MOV R3,R3,LSL R6
+   MOV R4,R4,LSL R6
+   MOV R5,R5,LSL R6
+
+
+   STR R2,[R7]
+   STR R3,[R7,#16]
+   STR R4,[R7,#32]
+   STR R5,[R7,#48]
+
+   ADD R7,R7,#4
+   ADD R1,R1,#1
+
+   SUB R10,R8,R1               ; R10=(1-t)
+   MUL R4,R10,R1               ; R4=(1-t)*t
+   MUL R4,R1,R4                ; R4=(1-t)*t^2
+   ADD R4,R4,R4,LSL#1          ; R4=3*(1-t)*t^2
+   MUL R3,R10,R10              ; R3=(1-t)^2
+   MUL R2,R3,R10               ; R2=(1-t)^3
+   MUL R3,R1,R3                ; R3=t*(1-t)^2
+   ADD R3,R3,R3,LSL #1         ; R3=3*t*(1-t)^2
+   MUL R5,R1,R1
+   MUL R5,R1,R5                ; R5=t^3
+
+   MOV R2,R2,LSL R6            ; make sure absolute values are same regardless of bezier resolution
+   MOV R3,R3,LSL R6
+   MOV R4,R4,LSL R6
+   MOV R5,R5,LSL R6
+
+
+   STR R2,[R7]
+   STR R3,[R7,#16]
+   STR R4,[R7,#32]
+   STR R5,[R7,#48]
+
+
+   ADD R7,R7,#52
+
+ADD R1,R1,#1
+CMP R1,R8
+BLS Buv_loop
+
+SWI "OS_EnterOS"                   ; supervisor mode to be able to plot directly to screen
+;;;;;;;;;;;;;;;;;;;;;;;;; end initiation ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;; MAIN MAIN MAIN  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;initial definition
+
+.input_loop
+;
+; check input
+;    if object change, --> subroutine  define --> only object to change, type of change}
+;                      --> subroutine  rotate view for object, recalculate object 3d points
+;                      --> subroutine  calculate object 2d points
+;    if camera change, --> subroutine  rotate all objects with matrix, recalculate scene 3d points
+;                      --> subroutine  calculate scene 2d points
+;
+;   .object draw loop
+;      for each object, draw objects from 2d
+;    B object draw loop
+;
+;
+; BAL input_loop
+
+LDR R0,[R12,#screen_address_0]
+STR R0,[R12,#active_screen_address]
+.view_angle
+LDR R0,[R12,#camera_angle_a]
+LDR R1,[R12,#camera_angle_b]
+ADD R2,R12,#sin
+ADD R3,R12,#cos
+BL calculate_rotation_matrix
+
+LDR R10,[R12,#number_of_objects]   ; R10 is total number of objects
+SUB R10,R10,#1                        ; R10 is the object at hand (first object=0)
+MOV R6,#first_object_address       ; R6 is offset address that holds address of first object
+.objects_loop
+    ADD R6,R6,R10, LSL #2
+    LDR R0,[R12,R6]                   ; R0 contains offset start address of object nr R10
+    ;ADD R4,R0,#object_type<<2        ;
+    ;LDR R5,[R12,R4]                  ; R5 is object type
+    ;CMP R5,#&FF
+    ADD R0,R12,R0                     ; R0 contains absolute address of object nr R10
+    ADD R11,R0,#bezier_control_points
+    ADD R8,R11,#84                    ; address of y- value of a control point
+    ADD R9,R11,#104                   ; address of y- value of another control point
+
+    MOV R7,#&100                       ; R7 is main counter for animation, regardless of what is, varies
+    MVN R4,R7                         ; this case, 2 control points
+
+
+
+    BL define_bezier
+
+    .control_point_loop                     ; start of the animation, in this case changing a bezier control point
+
+
+              ;;;; Key press wil exit
+              STMFD R13!,{R0}
+              STMFD R13!,{R1}
+              MOV R0,#121
+              MOV R1,#65
+              EOR R1,R1,#&80
+              SWI "OS_Byte"
+              CMP R1,#&FF
+              BEQ exit
+              LDMFD R13!,{R1}
+              ;;;;; end key press check
+     LDR R0,[R12,#camera_angle_a]
+     STR R1,[R12,#camera_angle_b]
+     ADD R2,R12,#sin
+     ADD R3,R12,#cos
+     MOV R4,R7,LSL #8
+     STR R4,[R8]
+     MVN R4,R4
+     STR R4,[R9]
+     LDMFD R13!,{R0}
+     BL define_bezier
+     BL rotate_object
+
+
+     ;BL calculate_rotation_matrix
+
+     BL screenbank
+
+     BL create_2d
+     BL draw_bezier
+    ;BL draw_bezier_controlpoints
+
+    SUBS R7,R7,#1
+    MVN R4,#&100
+    ADD R4,R4,#1
+    CMP R7,R4
+    BNE control_point_loop
+
+
+
+    SUBS R10,R10,#1
+BGE objects_loop
+
+
+
+
+;LDR R0,[R12,#screen_address_0]
+;STR R0,[R12,#active_screen_address]
+;
+;
+;LDR R10,[R12,#number_of_objects]   ; R10 is total number of objects
+;SUB R10,R10,#1                     ; R10 is the object at hand (first object=0)
+;MOV R6,#first_object_address       ; R6 is offset address that holds address of first object
+;
+;ADD R6,R6,R10, LSL #2
+;
+;LDR R0,[R12,R6]                       ; R0 contains offset start address of object nr R10
+;
+;
+;ADD R0,R12,R0                         ; R0 contains absolute address of object nr R10
+;
+;    MOV R7,#&4000                      ; R7 is main counter
+;
+;    .loop
+;     BL define_bezier                 ; R0 address of object nr,R12 is block%
+;    SUBS R7,R7,#1
+;    BNE loop
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Exit ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+.exit
+LDR R0,[R12,#vfp_context]
+MOV R1,#0                         ; Null context
+SWI "VFPSupport_DestroyContext"
+SWI "OS_LeaveOS"
+MOV R15,R14
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;end MAIN ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;  Vsync + screenbank choice ;;;;;;;;;;;;;;
+.screenbank
+STMFD R13!,{R0-R12,R14}      ; R0 will become screenbank to draw on
+                                  ; R1 will become screenbuffersize (=fb /2)
+                                  ; R4 is toggle
+                                  ; R7 is  main counter
+MOV R0,#113
+AND R4,R7,#%1           ;R4, screenbank number value
+MOV R1,R4,LSL #1        ;R1  alternates to be 0 or 2
+SWI "OS_Byte"
+MOV R0,#19              ;Only necessary on RPi2...wait Vsync
+SWI "OS_Byte"
+
+CMP R4,#0
+LDRNE R0, [R12,#screen_address_0]       ;screenbuffer start address R0 = screen NOT shown
+LDREQ R0, [R12,#screen_address_1]
+STR R0,[R12,#active_screen_address]
+LDR R1,[R12,#fb_size]
+MOV R1,R1, LSR #1
+BL clearscreen
+LDMFD R13!,{R0-R12,R15}
+;;;;;;;;;;;;;;;;;;;;;;;; end of Vsync + screenbank choice ;;;;;;;;;
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;; procedures ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;; define bezier ;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; R0 contains start address of bezier object at hand, R12=block%
+; thus data of object can be retrieved and bezier points can be calculated.
+; All registers are being stored and returned afterwards
+
+.define_bezier
+STMFD R13!,{R0-R12,R14}
+LDR R7,[R0,#object_resolution]         ; R7 contains bezier resolution in bits per patch (i.e. 5 = 32x32)
+STR R7,temp7
+MOV R1,#1                              ; we need a 1
+MOV R7,R1,LSL R7                       ; R7 is now resolution of Bezier patch
+
+ADD R11,R12,#Buv                       ; R11 contains start address of B(t) values to be used for B(u), R12 is not needed anymore
+MOV R5,R7,LSL #4                       ; R11 should contain address of last value (n) because it counts down
+ADD R11,R11,R5
+ADD R11,R11,#60
+MOV R5,R11                             ; R5 contains address of last 4 B(t) values to be used for B(v) (n,n-1,n-2,n-3)
+SUB R5,R11,#28                        ; but R11 should contain last B(t) value (n)
+
+
+ADD R10,R0,#bezier_control_points      ; R10 contains start address of 16 control points  x1...x16,y1...y16,z1..z16
+ADD R9,R0,#bezier_points               ; R9 contains destination --> calculated bezier points  x1,y1,z1...x2,y2,z2...
+STR R9,temp1
+ADD R8,R7,#1                           ; but we start at the end, counting down, so R9=R9+ (R7+1)^2
+MUL R1,R8,R8
+
+MOV R2,#12
+MUL R1,R2,R1
+
+ADD R9,R1,R9
+STR R9,temp2
+SUB R9,R9,#48                          ; however the first point to start is R9 -48 bytes (4*x/y/z*4 bytes=48)
+STR R9,temp3
+MOV R8,R5                              ; R8 is temp value to hold originial R5
+
+MVN R6,#31                             ; R6 is step size for B(t) values (per t,t+1)
+MOV R4,#24                             ; R4 is temp value to be used to update LDR/STR address
+
+MOV R1,R7                              ; R1 is u starting on top
+MOV R2,R7                              ; R2 is v starting on top, R7 is not needed anymore
+
+.loop_u
+
+   LDR R12,[R11]                       ; Load last 4 B(t) values t^3
+   VDPL.32 Q15,R12                     ;
+   LDR R12,[R11,#-16]                  ; Load last 4 B(t) values 3*(1-t)*t^2
+   VDPL.32 Q14,R12
+   LDR R12,[R11,#-32]
+   VDPL.32 Q13,R12
+   LDR R12,[R11,#-48]
+   VDPL.32 Q12,R12
+
+   .loop_v
+      VLD1.32 {D12-D15},[R5],R6         ; get B(v) values
+      VLD1.32 {D8-D11},[R5],R6
+
+      ;;;;;;;;;;;;; start X-value ;;;;;;;;;;;;;
+      VLD1.32 {D0-D1},[R10]!         ; get first 4 X values of control points
+
+      VMUL.S32 Q10,Q12,Q4               ; Q10=temp
+
+
+
+      VQRDMULH.S32 Q9,Q10,D0[0]       ; Q9 becomes THE X-value!!
+      VMUL.S32 Q10,Q13,Q4
+      VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q4               ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q4
+      VQRDMULH.S32 Q11,Q10,D1[1]
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q5               ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE X-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q5
+      VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q5               ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q5
+      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q6               ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE X-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q6
+      VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q6               ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q6
+      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q7               ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE X-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q7
+      VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q7               ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q7
+      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VADD.S32 Q9,Q9,Q11
+
+      VMOV Q1,Q9
+      ;;;;;;;;;; start Y-value ;;;;;;;;;;;;;;
+
+      VLD1.32 {D0-D1},[R10]!         ; get first 4 Y values of control points
+
+      VMUL.S32 Q10,Q12,Q4            ; Q10=temp
+      VQRDMULH.S32 Q9,Q10,D0[0]      ; Q9 becomes THE Y-value!!
+      VMUL.S32 Q10,Q13,Q4
+      VQRDMULH.S32 Q11,Q10,D0[1]     ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q4            ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q4
+      VQRDMULH.S32 Q11,Q10,D1[1]     ;
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q5            ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]     ; Q9 becomes THE Y-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q5
+      VQRDMULH.S32 Q11,Q10,D0[1]     ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q5            ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q5
+      VQRDMULH.S32 Q11,Q10,D1[1]     ;
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q6            ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]     ; Q9 becomes THE Y-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q6
+      VQRDMULH.S32 Q11,Q10,D0[1]     ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q6               ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q6
+      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q7               ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE Y-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q7
+      VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q7             ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q7
+      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VADD.S32 Q9,Q9,Q11
+
+      VMOV Q2,Q9
+      ;;;;;;;;;;; start Z-value ;;;;;;;;;;;;;;;;;;;;;;;;;
+
+      VLD1.32 {D0-D1},[R10]!         ; get first 4 Z values of control points
+
+      VMUL.S32 Q10,Q12,Q4            ; Q10=temp
+      VQRDMULH.S32 Q9,Q10,D0[0]      ; Q9 becomes THE Z-value!!
+      VMUL.S32 Q10,Q13,Q4
+      VQRDMULH.S32 Q11,Q10,D0[1]     ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q4            ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q4
+      VQRDMULH.S32 Q11,Q10,D1[1]     ;
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q5             ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE Z-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q5
+      VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q5             ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q5
+      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q6             ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE Z-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q6
+      VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q6             ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q6
+      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VADD.S32 Q9,Q9,Q11
+
+      VLD1.32 {D0-D1},[R10]!
+
+      VMUL.S32 Q10,Q12,Q7             ; Q10=temp
+      VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE Z-value!!
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q13,Q7
+      VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q14,Q7             ;
+      VQRDMULH.S32 Q11,Q10,D1[0]
+      VADD.S32 Q9,Q9,Q11
+      VMUL.S32 Q10,Q15,Q7
+      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VADD.S32 Q9,Q9,Q11
+
+      VMOV Q3,Q9
+
+      VST3.32 {D2,D4,D6},[R9],R4
+      VST3.32 {D3,D5,D7},[R9]
+      ;ADD R9,R9,R4
+
+   ;STMFD R13!,{R1,R2}                    ; debugging stuff
+   ;CMP R1,#0
+   ;CMPEQ R2,#0
+
+   ;STREQ R9,temp4
+   ;VMOVEQ R1,R2,D18
+   ;STREQ R1,temp5
+   ;STREQ R2,temp6
+   ;VMOVEQ R1,R2,D19
+   ;STREQ R1,temp3
+   ;STREQ R2,temp4
+   ;LDMFD R13!,{R1,R2}
+   ;BEQ exit_routine
+
+      SUB R10,R10,#192
+      SUB R9,R9,#72                      ; ? not finished yet
+      SUBS R2,R2,#4
+      BNE loop_v
+
+
+      ADD R9,R9,#36
+
+      VLD1.32 {D0-D1},[R10]
+      VSHL.I32 Q4,Q12,#(max*3)
+      VSHL.I32 Q5,Q13,#(max*3)
+      VSHL.I32 Q6,Q14,#(max*3)
+      VSHL.I32 Q7,Q15,#(max*3)
+
+      VQRDMULH.S32 Q3,Q4,D0[0]
+      ;VADD.S32 Q3,Q10,Q3
+      VQRDMULH.S32 Q9,Q5,D0[1]
+      VADD.S32 Q3,Q9,Q3
+      VQRDMULH.S32 Q9,Q6,D1[0]
+      VADD.S32 Q3,Q9,Q3
+      VQRDMULH.S32 Q9,Q7,D1[1]
+      VADD.S32 Q3,Q9,Q3
+      VST1.32 {D6[0]},[R9]
+      ADD R9,R9,#4
+      ADD R10,R10,#64
+
+      VLD1.32 {D0-D1},[R10]
+
+      VQRDMULH.S32 Q3,Q4,D0[0]
+      ;VADD.S32 Q3,Q9,Q10
+      VQRDMULH.S32 Q9,Q5,D0[1]
+      VADD.S32 Q3,Q9,Q3
+      VQRDMULH.S32 Q9,Q6,D1[0]
+      VADD.S32 Q3,Q9,Q3
+      VQRDMULH.S32 Q9,Q7,D1[1]
+      VADD.S32 Q3,Q9,Q3
+      VST1.32 {D6[0]},[R9]
+      ADD R9,R9,#4
+      ADD R10,R10,#64
+
+      VLD1.32 {D0-D1},[R10]
+
+      VQRDMULH.S32 Q3,Q4,D0[0]
+      ;VADD.S32 Q3,Q9,Q10
+      VQRDMULH.S32 Q9,Q5,D0[1]
+      VADD.S32 Q3,Q9,Q3
+      VQRDMULH.S32 Q9,Q6,D1[0]
+      VADD.S32 Q3,Q9,Q3
+      VQRDMULH.S32 Q9,Q7,D1[1]
+      VADD.S32 Q3,Q9,Q3
+      VST1.32 {D6[0]},[R9]
+      SUB R10,R10,#128
+      SUB R9,R9,#8
+
+
+      ;store something in v=0 --> x,y,z=12 bytes
+      MOV R2,R7
+      SUB R9,R9,#48
+      MOV R5,R8                ; restore to original R5
+
+      SUB R1,R1,#1
+      ANDS R12,R1,#%11         ; work in progress...
+      SUBNE R11,R11,#4
+      SUBEQ R11,R11,#52
+      CMP R1,#0
+   BGE loop_u                  ; the u loop includes the 0
+ ;LDMFD R13!,{R12}
+.exit_routine
+LDMFD R13!,{R0-R12,R15}
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;; end define bezier ;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;; calculate rotation matrix ;;;;;;;;;;;;;;;;;
+.calculate_rotation_matrix   ; R0 = camera_angle_a, R1 = camera_angle_b
+
+STMfD R13!,{R0-R12,R14}
+
+MOV R5,R0,LSL #2
+MOV R6,R1,LSL #2
+
+LDR R7,[R2,R0,LSL #2]        ; R7=sin(A)               element B3
+LDR R4,[R3,R0,LSL #2]        ; R4=cos(A)               element B2
+LDR R9,[R2,R1,LSL #2]        ; R9=sin(B)
+LDR R0,[R3,R1,LSL #2]        ; R0=cos(B)               element A1
+MUL R3,R7,R9                 ;
+RSB R3,R3,#0                 ; R3=-sin(A)*sin(B)       element A2
+MUL R6,R4,R9                 ; R6=cos(A)*sin(B)        element A3
+MOV R9,R9,ASL #8             ; start making single values *256
+RSB R2,R9,#0                 ; R2=-sin(B)              element C1
+MUL R5,R7,R0                 ;
+RSB R5,R5,#0                 ; R5=-sin(A)*cos(B)       element C2
+MUL R8,R4,R0                 ; R8=cos(A)*cos(B)        element C3
+MOV R0,R0,ASL #8             ; singles values need to be *256
+MOV R4,R4,ASL #8             ;
+MOV R7,R7,ASL #8             ;
+MOV R1,#0
+
+ADD R9,R12,#matrices
+STMIA R9,{R0-R8}             ; (block%+matrices<<2) contains rotation matrix for angles a,b
+LDMFD R13!,{R0-R12,R15}
+;;;;;;;;;;;;;;;;;;;;;;;;;;;; end calculation rotation matrix ;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;; rotate object ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+.rotate_object                       ; for now, I focus on bezier only
+
+STMFD R13!,{R0-R12,R14}
+                                     ; R0 is start address of object, R12=block%
+
+LDR R8,[R0,#object_resolution   ]    ; Get resolution of Bezier
+MOV R10,#1
+MOV R8,R10,LSL R8
+MOV R1,R8                            ; R1 and R2, u and v counters
+MOV R2,R8                            ; starting high
+ADD R8,R8,#1                         ; number of u and v points (resolution+1)
+
+
+; we need Rx for address of matrix, Ry for start address of object vertices and Rz for start address of rotated view
+; vertices
+ADD R9,R12,#matrices                         ;R9=Rx
+ADD R10,R0,#bezier_points                    ;R10=Ry
+ADD R12,R0,#bezier_rotated_view_points       ;R12=Rz      will return to main block pointer later
+
+.matrix_multiply_u
+ SUB R2,R8,#1
+ .matrix_multiply_v
+   MLA R0,R8,R1,R2           ; Calculate offset address (u,v) from Bezier points (R10)
+   MOV R0,R0,LSL#3           ; u * resolution *12 +v *12
+   ADD R0,R0,R0,LSR#1        ; [R0]=X, [R0+4]=Y, [R0+8]=Z
+   ADD R10,R0,R10            ; R10 is address of X,Y,Z
+   LDMIA R10,{R3-R5}         ; R3=X,R4=Y,R5=Z
+   SUB R10,R10,R0            ; restore R10 to bezier_points address
+   STMFD R13!,{R1,R2,R8,R10} ; save counters u,v, bezier resolution and bezier_points address to obtain extra registers
+   MOV R1,#0                 ; R1,R2 become Long result of each line of matrix multiplication
+   MOV R2,#0                 ;
+   LDMIA R9!,{R6,R7,R8}      ; load elements A1,B1 and C1 of matrix in R6-R8
+   SMULL R1,R2,R6,R3         ; perform multiplication (B1=0)
+   SMLAL R1,R2,R8,R5         ;
+   MOV R10,R2,ASL #16        ; R10 is scaled down by 2^16, and contains rotated X
+   ADD R10,R10,R1,LSR #16    ;
+   STR R10,[R12,R0]          ; store X of rotated Bezier point into bezier rotated view (R12)
+   ADD R0,R0,#4
+   MOV R1,#0
+   MOV R2,#0
+   LDMIA R9!,{R6,R7,R8}      ; load elements A2,B2 and C2 of matrix in R6-R8
+   SMULL R1,R2,R6,R3
+   SMLAL R1,R2,R7,R4
+   SMLAL R1,R2,R8,R5
+   MOV R10,R2,ASL #16        ; scale down by 2^16
+   ADD R10,R10,R1,LSR #16
+   STR R10,[R12,R0]          ; store Y of rotated Bezier point
+   ADD R0,R0,#4
+   MOV R1,#0
+   MOV R2,#0
+   LDMIA R9!,{R6,R7,R8}      ; load elements A3,B3 and C3 of matrix in R6-R8
+   SMULL R1,R2,R6,R3
+   SMLAL R1,R2,R7,R4
+   SMLAL R1,R2,R8,R5
+   MOV R10,R2,ASL #16        ; scale down by 2^16
+   ADD R10,R10,R1,LSR #16
+   SUB R9,R9,#36                   ; Restore R9 to original value, i.e. block%+ matrices<<2
+   SUB R1,R9,#matrices             ; R1 becomes block%
+   ADD R1,R1,#camera_distance      ; retrieve camera_distance value, to add to rotated Z
+   LDR R2,[R1]                     ; R2=camera_distance
+   ADD R10,R2,R10
+   STR R10,[R12,R0]                ; store Z+camera_distance of rotated Bezier point
+
+  LDMFD R13!,{R1,R2,R8,R10}        ; restore u,v counters, resolution and bezier_points address
+ SUBS R2,R2,#1
+ BPL matrix_multiply_v
+SUBS R1,R1,#1
+BPL matrix_multiply_u
+
+
+
+
+
+LDMFD R13!,{R0-R12,R15}
+;;;;;;;;;;;;;;;;;;;;;;;;;;;; end of object rotation ;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;; create 2d points ;;;;;;;;;;;;;;;;;;;;;;;;;;;
+.create_2d
+STMFD R13!,{R0-R12,R14}
+
+                                     ; R0 is start address of object, R12=block%
+LDR R8,[R0,#object_resolution]    ; Get resolution of Bezier
+MOV R10,#1
+MOV R8,R10,LSL R8
+MOV R1,R8                            ; R1 and R2, u and v counters
+MOV R2,R8                            ; starting high
+ADD R8,R8,#1                         ; number of u and v points (resolution+1)
+ADD R7,R0,#bezier_rotated_view_points    ; R9 is start address of bezier_rotated_view_points
+ADD R0,R0,#bezier_screen_data        ; R0 is store location of 2d coordinates + Z-value
+LDR R3,[R12,#camera_zoom_factor]
+VMOV S0,R3
+VCVT.F32.U32 S8,S0                   ; S8=camera_zoom_factor
+
+.u_loop2
+ SUB R2,R8,#1
+ .v_loop2
+
+   MLA R10,R8,R1,R2          ; Calculate offset address (u,v) from rotated Bezier points (R7)
+   MOV R10,R10,LSL#3         ; u * resolution *12 +v *12
+   ADD R10,R10,R10,LSR#1     ; [R10]=X, [R10+4]=Y, [R10+8]=Z
+   ADD R9,R7,R10             ; R9 is address where rotated points are R7+offset R10
+
+   VLDMIA R9!,{S2-S4}        ; S2=int X, S3=int Y, S4=int(Z+camera_distance)
+   VMOV R6,S4
+   VCVT.F32.S32 S5,S2        ; S5=float X
+   VCVT.F32.S32 S6,S3        ; S6=float Y
+   VCVT.F32.S32 S7,S4        ; S7=float(Z+W%)
+   VDIV.F32 S7,S8,S7         ; make factor, zoomfactor*1/(Z+W%)=  S8/S7
+   VMUL.F32 S5,S5,S7         ; S5 = X * factor
+   VMUL.F32 S6,S6,S7         ; S6 = Y * factor
+   VCVT.S32.F32 S5,S5
+   VCVT.S32.F32 S6,S6
+   VMOV R4,S5                ; R5=int S5
+   VMOV R5,S6                ; R6=int S6
+   STR R4,[R0,R10]           ; Screen_X
+   ADD R10,R10,#4
+   STR R5,[R0,R10]           ; Screen_Y
+   ADD R10,R10,#4
+   STR R6,[R0,R10]           ; Z-info!
+   SUBS R2,R2,#1
+ BGE v_loop2
+SUBS R1,R1,#1
+BGE u_loop2
+
+
+
+
+LDMFD R13!,{R0-R12,R15}
+;;;;;;;;;;;;;;;;;;;;;;;;;;;; end of creating 2d points
+
+
+;;;;;;;;;;;;;;;;;;;;  Draw Bezier ;;;;;;;;;;;;;;;;;;;;;;
+.draw_bezier
+STMFD R13!,{R0-R12,R14}
+
+                                  ; R0 is start address of object, R12=block%
+LDR R8,[R0,#object_resolution]    ; Get resolution of Bezier
+MOV R10,#1
+MOV R8,R10,LSL R8
+ADD R8,R8,#1                         ; number of u and v points (resolution+1)
+ADD R9,R0,#bezier_screen_data     ;
+
+MOV R4,#0                 ; bezier counters u,v in R4,R5
+SUB R5,R8,#1              ;
+MLA R10,R8,R4,R5          ; R10 = offset address (u,v) from bezier_screen_data (R9)
+MOV R10,R10,LSL#3         ; u * resolution *12 +v *12
+ADD R10,R10,R10,LSR#1     ; [R10]=X1, [R10+4]=Y1
+
+MOV R6,R0                 ; R6 becomes object_address because we need R0
+
+;;;;;;;; draw edges of bezier
+
+LDR R0,[R9,R10]           ; R9 is offset to Bezier 2D screendata
+ADD R10,R10,#4
+LDR R1,[R9,R10]
+SUB R5,R5,#1
+.v_loop2
+  MLA R10,R8,R4,R5          ; R10 = offset address (u,v) from bezier_screen_data (R9)
+  MOV R10,R10,LSL#3         ; u * resolution *12 +v *12
+  ADD R10,R10,R10,LSR#1     ; [R10]=X1, [R10+4]=Y1
+  LDR R2,[R9,R10]
+  ADD R10,R10,#4
+  LDR R3,[R9,R10]
+  STMFD R13!,{R4}
+  LDR R4,[R6,#object_color]
+  BL line
+  LDMFD R13!,{R4}
+  MOV R0,R2
+  MOV R1,R3
+SUBS R5,R5,#1
+BGE v_loop2
+
+SUB R4,R8,#1
+SUB R5,R8,#1
+MLA R10,R8,R4,R5          ; R10 = offset address (u,v) from bezier_screen_data (R9)
+MOV R10,R10,LSL#3         ; u * resolution *12 +v *12
+ADD R10,R10,R10,LSR#1     ; [R10]=X1, [R10+4]=Y1
+LDR R0,[R9,R10]
+ADD R10,R10,#4
+LDR R1,[R9,R10]
+SUB R4,R4,#1
+.u_loop2
+  MLA R10,R8,R4,R5          ; R10 = offset address (u,v) from bezier_screen_data (R9)
+  MOV R10,R10,LSL#3         ; u * resolution *12 +v *12
+  ADD R10,R10,R10,LSR#1     ; [R10]=X1, [R10+4]=Y1
+  LDR R2,[R9,R10]
+  ADD R10,R10,#4
+  LDR R3,[R9,R10]
+  STMFD R13!,{R4}
+  LDR R4,[R6,#object_color]
+  BL line
+  LDMFD R13!,{R4}
+  MOV R0,R2
+  MOV R1,R3
+
+SUBS R4,R4,#1
+BGE u_loop2
+
+;;;;;;;;;;;;; end of drawing edges Bezier
+
+
+SUB R4,R8,#2                ; R0=u-1
+.u_loop1
+SUB R5,R8,#2                ; R1=v-1
+  .v_loop1
+  MLA R10,R8,R4,R5          ; R10 = offset address (u,v) from bezier_screen_data (R9)
+  MOV R10,R10,LSL#3         ; u * resolution *12 +v *12
+  ADD R10,R10,R10,LSR#1     ; [R10]=X1, [R10+4]=Y1
+  LDR R0,[R9,R10]
+  ADD R10,R10,#4
+  LDR R1,[R9,R10]
+
+  ADD R4,R4,#1
+  MLA R7,R8,R4,R5           ; R7 = offset address (u,v) from bezier_screen_data (R9)
+  MOV R7,R7,LSL#3           ; u * resolution *12 +v *12
+  ADD R7,R7,R7,LSR#1        ; [R9]=X2, [R9+4]=Y2
+  LDR R2,[R9,R7]
+  ADD R7,R7,#4
+  LDR R3,[R9,R7]
+  STMFD R13!,{R4}
+  ;CMP R4,#1
+  ;CMPEQ R5,#1
+  LDR R4,[R6,#object_color]
+  ;MOVEQ R4,#&FF
+  BL line
+  LDMFD R13!,{R4}
+  ADD R5,R5,#1
+  MLA R10,R8,R4,R5         ; R10 = offset address (u,v) from bezier_screen_data (R9)
+  MOV R10,R10,LSL#3         ; u * resolution *12 +v *12
+  ADD R10,R10,R10,LSR#1     ; [R10]=X1, [R10+4]=Y1
+  LDR R0,[R9,R10]
+  ADD R10,R10,#4
+  LDR R1,[R9,R10]
+  STMFD R13!,{R4}
+  LDR R4,[R6,#object_color]
+  BL line
+  LDMFD R13!,{R4}
+  SUB R4,R4,#1
+  SUBS R5,R5,#2
+  BGE v_loop1
+SUBS R4,R4,#1
+BGE u_loop1
+
+LDMFD R13!,{R0-R12,R15}
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; end of drawing Bezier ;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; draw bezier control points ;;;;;;;;;;;;;;;;;;
+.draw_bezier_controlpoints
+STMFD R13!,{R0-R12,R14}
+
+MOV R10,#&FF                          ; color of control points
+MOV R9,#3                             ; counter x
+MOV R8,#3                             ; counter y
+
+.loop_x
+
+.loop_y
+
+
+
+
+ SUBS R8,R8,#1
+ BGE loop_y
+SUBS R9,R9,#1
+BGE loop_x
+
+
+LDMFD R13!,{R0-R12,R15}
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; end of drawing bezier control points ;;;;;;;;
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; draw line  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+.line                          ;R0,R1 contain start x,y  R2,R3 contain end x,y
+STMFD R13!,{R0-R12,R14}
+
+;;;;;;;;;;;; test within screen   ;;;;;;;;;;;;;;;;;
+CMP R0,#&280
+LDMGTFD R13!,{R0-R12,R15}
+CMN R0,#&280
+LDMMIFD R13!,{R0-R12,R15}
+
+CMP R2,#&280
+LDMGTFD R13!,{R0-R12,R15}
+CMN R2,#&280
+LDMMIFD R13!,{R0-R12,R15}
+
+CMP R1,#&168
+LDMGTFD R13!,{R0-R12,R15}
+CMN R1,#&168
+LDMMIFD R13!,{R0-R12,R15}
+
+CMP R3,#&168
+LDMGTFD R13!,{R0-R12,R15}
+CMN R3,#&168
+LDMMIFD R13!,{R0-R12,R15}
+;;;;;;;;;;;;; end test within screen  ;;;;;;;;;;;;;;
+
+
+;;;;;;;;;;;; get right order of points (y1 < y2)
+CMP R0,R2
+ADDEQ R2,R2,#1
+
+CMP R1,R3
+MOVGT R9,R1
+MOVGT R1,R3
+MOVGT R3,R9
+MOVGT R9,R0
+MOVGT R0,R2
+MOVGT R2,R9
+STMFD R13!,{R12}     ; store block% to make way for extra register to hold tangient
+
+SUB R9,R2,R0         ; Delta X
+SUBS R10,R3,R1       ; Delta Y
+BEQ horizontal
+
+MOV R9,R9,ASL#10
+VMOV S6,R9
+VMOV S7,R10
+VCVT.F32.S32 S1,S6
+VCVT.F32.S32 S2,S7
+VDIV.F32 S0,S1,S2    ; S0 = tangient <<10
+VCVT.S32.F32 S6,S0
+VMOV R12,S6          ; R12 = tangient <<10
+CMP R12,#0
+
+BMI negative
+
+MOV R6,R0,ASL #10    ; x_start <<10
+MOV R9,R1            ; R9 is counter from lowest y to highest y
+LDMFD R13!,{R8}          ; R8 is address of block%
+LDR R2,[R8,#x_init]     ; Load screen basics
+LDR R10,[R8,#y_init]    ;
+LDR R5,[R8,#active_screen_address]    ;
+
+.pixels_y
+ ADD R6,R6,R12
+ SUB R7,R6,R0,LSL #10     ; R7 becomes nr of pixels to draw
+ MOV R7,R7, ASR#10        ; R0 = x_start!
+ RSB R1,R9,R10            ; R1 is temp value
+ MUL R8,R1,R2             ; R8 is temp value
+ MOV R0,R0,LSL #2         ;
+ ADD R1,R0,R2,LSR #1      ;
+ ADD R8,R1,R8             ; R2,R3 are x and y screen related values
+ ADD R8,R5,R8             ; R5 is  final offset address for pixel, R9 is y
+ .pixels_x
+   STR R4,[R8],#4
+   SUBS R7,R7,#1
+  BGT pixels_x
+  MOV R0,R6, ASR # 10               ; new x_start, back to screen values
+ ADD R9,R9,#1
+ CMP R9,R3
+BLT pixels_y
+.endroutine
+LDMFD R13!,{R0-R12,R15}
+
+.horizontal
+MOVS R7,R9                 ; number of pixels to draw = Delta X
+RSBMI R7,R7,#0
+MOVMI R0,R2
+LDMFD R13!,{R8}
+
+LDR R2,[R8,#x_init]     ; Load screen basics
+LDR R10,[R8,#y_init]    ;
+LDR R5,[R8,#active_screen_address]    ;
+
+  RSB R1,R1,R10            ; R1 is temp value
+  MUL R8,R1,R2             ; R8 is temp value
+  MOV R0,R0,LSL #2         ;
+  ADD R1,R0,R2,LSR #1      ;
+  ADD R8,R1,R8             ; R2,R3 are x and y screen related values
+  ADD R8,R5,R8             ; R5 is  final offset address for pixel, R9 is y
+ .pixels_xh
+   STR R4,[R8],#4
+   SUBS R7,R7,#1
+ BGT pixels_xh
+LDMFD R13!,{R0-R12,R15}
+
+.negative
+
+MOV R6,R0,ASL #10     ; x_start <<10
+MOV R9,R1             ; R9 is counter from lowest y to highest y
+ LDMFD R13!,{R8}
+
+ LDR R2,[R8,#x_init]   ; Load screen basics
+ LDR R10,[R8,#y_init]   ;
+ LDR R5,[R8,#active_screen_address]   ;
+
+.pixels_yn
+ ADD R6,R6,R12
+ RSB R7,R6,R0,LSL #10     ; R7 becomes nr of pixels to draw
+ MOV R7,R7, ASR#10        ; R0 = x_start!
+
+ RSB R1,R9,R10            ; R1 is temp value
+ MUL R8,R1,R2             ; R8 is temp value
+ MOV R0,R0,LSL #2         ;
+ ADD R1,R0,R2,LSR #1      ;
+ ADD R8,R1,R8             ; R2,R3 are x and y screen related values
+ ADD R8,R5,R8             ; R5 is  final offset address for pixel, R9 is y
+ .pixels_xn
+   STR R4,[R8],#-4
+   SUBS R7,R7,#1
+  BGT pixels_xn
+  MOV R0,R6, ASR # 10               ; new x_start, back to screen values
+ ADD R9,R9,#1
+ CMP R9,R3
+BLT pixels_yn
+LDMFD R13!,{R0-R12,R15}
+
+;;;;;;;;;;;;;;;;;;;;;;;  end of line routine  ;;;;;;;;;;;;;
+
+
+;;;;;;;;;;;;;;;;;; clear screen, ;;;;;;;;;;;;;;;;;
+.clearscreen
+STMFD R13!,{R0-R12,R14}
+;R0 is screenbuffer to write
+;R1 is screensize to write
+MOV R2,#0
+MOV R3,#0
+MOV R4,#0
+MOV R5,#0
+MOV R6,#0
+MOV R7,#0
+MOV R8,#0
+MOV R9,#0
+MOV R10,#0
+MOV R12,#0
+.CLSloop
+STMIA R0!,{R2-R10,R12}
+SUBS R1,R1,#40
+BNE CLSloop
+
+LDMFD R13!,{R0-R12,R15}       ;return to main
+;;;;;;;;;;;;;;;;;;;;;; end of clear screen ;;;;;;;;;;;;;;;;;;;
+
+
+
+.animation_counter
+EQUD 100
+.temp
+EQUD 0
+.temp1
+EQUD 0
+.temp2
+EQUD 0
+.temp3
+EQUD 0
+.temp4
+EQUD 0
+.temp5
+EQUD 0
+.temp6
+EQUD 0
+.temp7
+EQUD 0
+.temp8
+EQUD 0
+.temp9
+EQUD 0
+.temp10
+EQUD 0
+.temp11
+EQUD 0
+.temp12
+EQUD 0
+.temp13
+EQUD 0
+.temp14
+EQUD 0
+.temp15
+EQUD 0
+.temp16
+EQUD 0
+
+
+
+
+]
+NEXT pass
+
+A%=block%
+B%=stack%
+TIME=0
+CALL code%
+PRINT TIME
+
+END
+A=GET
+MODE 1920,1080,32
+REM PRINT ~!temp1,~!temp2,~!temp3,~!temp4
+PRINT !temp5,!temp6,!temp7
+
+REM Adres%=block%+!(block%+first_object_address)+bezier_points
+REM PRINT ~Adres%
+
+
+REM FOR U%=0 TO 32
+REM FOR V%=0 TO 32
+REM
+REM MOVE V%*100+50,U%*30+650
+REM A%=U%*33*12+V%*12
+REM B%=!(Adres%+A%+4)
+REM PRINT B%
+REM NEXT
+REM NEXT
+REM END
+
+
+  COLOUR 255,255,255
+
+
+PROCDraw_Table(block%+Buv,16,8)
+REM PROC_Draw_Table(Adres,16,96)
+
+END
+
+
+
+DEF PROCDraw_Table(Address%,Stride%,Number%)
+  LOCAL A%,B%,Toggle%
+  Toggle%=0
+
+  PRINT
+  FOR B%=0 TO Stride%
+   PRINT ~B%;
+  NEXT
+  PRINT '
+
+
+
+  FOR A%=0 TO 4*Stride%*Number% STEP 4*Stride%
+    COLOUR 255,255-128*Toggle%,255
+    PRINT A%DIVStride%;
+    FOR B%=0 TO Stride%-1
+      PRINT ~!(Address%+(A%)+(B%*4));
+    NEXT
+    PRINT
+    Toggle%=Toggle%EOR1
+  NEXT
+
+ENDPROC
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
