@@ -22,7 +22,7 @@ RISCOS is -unfortunately- hardly used anymore. For me it was the only way to sta
 Being aware of writing software in a very rare OS, I created a specific setup of the program that makes it relatively easy to port it to any kind of ARM v7 (or later) device, through modern IDE's.
 RISCOS has implemented a lot of system calls to make it easy for the programmer, even in assembly language. In my program I eliminated almost every system call. There are only two left:
 1. RISCOS has a very rudimentary way of dealing with the screen. In my program I had to use a system call to retrieve the hard address of the screenbuffer and its size.
-2. In order to use the floating point units in the Cortex A7, I had to create a VFP-context that I was only able to do throug a context.
+2. In order to use the floating point units in the Cortex A7, I had to create a VFP-context that I was only able to do throug a system call.
 All the rest is clean assembly with mnemonics that are indentical in other and newer assemblers.
 
 
