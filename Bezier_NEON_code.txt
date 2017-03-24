@@ -278,7 +278,6 @@ STR R0,[R12,#vfp_context]       ; save context pointer
 LDR R8,[R12,#bezier_resolution] ; max resolution for Beziers used
 RSB R6,R8,#max
 ADD R6,R6,R6,LSL #1
-;MOV R6,#0
 
 MOV R0,#1
 MOV R8,R0,LSL R8                ; R8 is 2^D%, the resolution of the patch
@@ -286,8 +285,6 @@ ADD R7,R12,#Buv                 ; R7 is address space to hold B(t) values
 STR R8,temp7
 
 MOV R1,#0
-;;.t_0
-
 MUL R2,R8,R8
 MUL R2,R8,R2
 MOV R2,R2,LSL R6
@@ -311,7 +308,6 @@ STR R5,[R7],#4
 STR R5,[R7],#4
 STR R5,[R7],#4
 STR R5,[R7],#4
-
 
 ADD R1,R1,#1
 .Buv_loop
@@ -349,7 +345,7 @@ ADD R1,R1,#1
    ADD R3,R3,R3,LSL #1         ; R3=3*t*(1-t)^2
    MUL R5,R1,R1
    MUL R5,R1,R5                ; R5=t^3
-   ;
+   
    MOV R2,R2,LSL R6            ; make sure absolute values are same regardless of bezier resolution
    MOV R3,R3,LSL R6
    MOV R4,R4,LSL R6
@@ -403,16 +399,13 @@ ADD R1,R1,#1
    MOV R3,R3,LSL R6
    MOV R4,R4,LSL R6
    MOV R5,R5,LSL R6
-
-
+   
    STR R2,[R7]
    STR R3,[R7,#16]
    STR R4,[R7,#32]
    STR R5,[R7,#48]
-
 
    ADD R7,R7,#52
-
 ADD R1,R1,#1
 CMP R1,R8
 BLS Buv_loop
@@ -453,7 +446,7 @@ ADD R3,R12,#cos
 BL calculate_rotation_matrix
 
 LDR R10,[R12,#number_of_objects]   ; R10 is total number of objects
-SUB R10,R10,#1                        ; R10 is the object at hand (first object=0)
+SUB R10,R10,#1                     ; R10 is the object at hand (first object=0)
 MOV R6,#first_object_address       ; R6 is offset address that holds address of first object
 .objects_loop
     ADD R6,R6,R10, LSL #2
@@ -469,13 +462,8 @@ MOV R6,#first_object_address       ; R6 is offset address that holds address of 
     MOV R7,#&100                       ; R7 is main counter for animation, regardless of what is, varies
     MVN R4,R7                         ; this case, 2 control points
 
-
-
     BL define_bezier
-
     .control_point_loop                     ; start of the animation, in this case changing a bezier control point
-
-
               ;;;; Key press wil exit
               STMFD R13!,{R0}
               STMFD R13!,{R1}
@@ -498,12 +486,7 @@ MOV R6,#first_object_address       ; R6 is offset address that holds address of 
      LDMFD R13!,{R0}
      BL define_bezier
      BL rotate_object
-
-
-     ;BL calculate_rotation_matrix
-
      BL screenbank
-
      BL create_2d
      BL draw_bezier
     ;BL draw_bezier_controlpoints
@@ -514,36 +497,8 @@ MOV R6,#first_object_address       ; R6 is offset address that holds address of 
     CMP R7,R4
     BNE control_point_loop
 
-
-
     SUBS R10,R10,#1
 BGE objects_loop
-
-
-
-
-;LDR R0,[R12,#screen_address_0]
-;STR R0,[R12,#active_screen_address]
-;
-;
-;LDR R10,[R12,#number_of_objects]   ; R10 is total number of objects
-;SUB R10,R10,#1                     ; R10 is the object at hand (first object=0)
-;MOV R6,#first_object_address       ; R6 is offset address that holds address of first object
-;
-;ADD R6,R6,R10, LSL #2
-;
-;LDR R0,[R12,R6]                       ; R0 contains offset start address of object nr R10
-;
-;
-;ADD R0,R12,R0                         ; R0 contains absolute address of object nr R10
-;
-;    MOV R7,#&4000                      ; R7 is main counter
-;
-;    .loop
-;     BL define_bezier                 ; R0 address of object nr,R12 is block%
-;    SUBS R7,R7,#1
-;    BNE loop
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Exit ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 .exit
@@ -558,9 +513,9 @@ MOV R15,R14
 ;;;;;;;;;;;;;;;;;;;;;;;;;  Vsync + screenbank choice ;;;;;;;;;;;;;;
 .screenbank
 STMFD R13!,{R0-R12,R14}      ; R0 will become screenbank to draw on
-                                  ; R1 will become screenbuffersize (=fb /2)
-                                  ; R4 is toggle
-                                  ; R7 is  main counter
+                             ; R1 will become screenbuffersize (=fb /2)
+                             ; R4 is toggle
+                             ; R7 is  main counter
 MOV R0,#113
 AND R4,R7,#%1           ;R4, screenbank number value
 MOV R1,R4,LSL #1        ;R1  alternates to be 0 or 2
@@ -592,7 +547,7 @@ LDMFD R13!,{R0-R12,R15}
 
 .define_bezier
 STMFD R13!,{R0-R12,R14}
-LDR R7,[R0,#object_resolution]         ; R7 contains bezier resolution in bits per patch (i.e. 5 = 32x32)
+LDR R7,[R0,#object_resolution]         ; R7 contains bezier resolution in bits per patch (i.e. 5 = (1+32)x(1+32))
 STR R7,temp7
 MOV R1,#1                              ; we need a 1
 MOV R7,R1,LSL R7                       ; R7 is now resolution of Bezier patch
@@ -603,7 +558,6 @@ ADD R11,R11,R5
 ADD R11,R11,#60
 MOV R5,R11                             ; R5 contains address of last 4 B(t) values to be used for B(v) (n,n-1,n-2,n-3)
 SUB R5,R11,#28                        ; but R11 should contain last B(t) value (n)
-
 
 ADD R10,R0,#bezier_control_points      ; R10 contains start address of 16 control points  x1...x16,y1...y16,z1..z16
 ADD R9,R0,#bezier_points               ; R9 contains destination --> calculated bezier points  x1,y1,z1...x2,y2,z2...
@@ -644,15 +598,12 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       ;;;;;;;;;;;;; start X-value ;;;;;;;;;;;;;
       VLD1.32 {D0-D1},[R10]!         ; get first 4 X values of control points
 
-      VMUL.S32 Q10,Q12,Q4               ; Q10=temp
-
-
-
+      VMUL.S32 Q10,Q12,Q4             ; Q10=temp
       VQRDMULH.S32 Q9,Q10,D0[0]       ; Q9 becomes THE X-value!!
       VMUL.S32 Q10,Q13,Q4
       VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q4               ;
+      VMUL.S32 Q10,Q14,Q4             
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q4
@@ -661,13 +612,13 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
 
       VLD1.32 {D0-D1},[R10]!
 
-      VMUL.S32 Q10,Q12,Q5               ; Q10=temp
+      VMUL.S32 Q10,Q12,Q5             ; Q10=temp
       VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE X-value!!
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q13,Q5
       VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q5               ;
+      VMUL.S32 Q10,Q14,Q5             ;
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q5
@@ -676,22 +627,22 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
 
       VLD1.32 {D0-D1},[R10]!
 
-      VMUL.S32 Q10,Q12,Q6               ; Q10=temp
+      VMUL.S32 Q10,Q12,Q6             ; Q10=temp
       VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE X-value!!
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q13,Q6
       VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q6               ;
+      VMUL.S32 Q10,Q14,Q6             
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q6
-      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VQRDMULH.S32 Q11,Q10,D1[1]      
       VADD.S32 Q9,Q9,Q11
 
       VLD1.32 {D0-D1},[R10]!
 
-      VMUL.S32 Q10,Q12,Q7               ; Q10=temp
+      VMUL.S32 Q10,Q12,Q7             ; Q10=temp
       VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE X-value!!
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q13,Q7
@@ -714,11 +665,11 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VMUL.S32 Q10,Q13,Q4
       VQRDMULH.S32 Q11,Q10,D0[1]     ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q4            ;
+      VMUL.S32 Q10,Q14,Q4            
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q4
-      VQRDMULH.S32 Q11,Q10,D1[1]     ;
+      VQRDMULH.S32 Q11,Q10,D1[1]     
       VADD.S32 Q9,Q9,Q11
 
       VLD1.32 {D0-D1},[R10]!
@@ -729,11 +680,11 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VMUL.S32 Q10,Q13,Q5
       VQRDMULH.S32 Q11,Q10,D0[1]     ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q5            ;
+      VMUL.S32 Q10,Q14,Q5            
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q5
-      VQRDMULH.S32 Q11,Q10,D1[1]     ;
+      VQRDMULH.S32 Q11,Q10,D1[1]     
       VADD.S32 Q9,Q9,Q11
 
       VLD1.32 {D0-D1},[R10]!
@@ -744,26 +695,26 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VMUL.S32 Q10,Q13,Q6
       VQRDMULH.S32 Q11,Q10,D0[1]     ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q6               ;
+      VMUL.S32 Q10,Q14,Q6               
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q6
-      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VQRDMULH.S32 Q11,Q10,D1[1]      
       VADD.S32 Q9,Q9,Q11
 
       VLD1.32 {D0-D1},[R10]!
 
-      VMUL.S32 Q10,Q12,Q7               ; Q10=temp
+      VMUL.S32 Q10,Q12,Q7             ; Q10=temp
       VQRDMULH.S32 Q11,Q10,D0[0]      ; Q9 becomes THE Y-value!!
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q13,Q7
       VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q7             ;
+      VMUL.S32 Q10,Q14,Q7             
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q7
-      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VQRDMULH.S32 Q11,Q10,D1[1]      
       VADD.S32 Q9,Q9,Q11
 
       VMOV Q2,Q9
@@ -776,11 +727,11 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VMUL.S32 Q10,Q13,Q4
       VQRDMULH.S32 Q11,Q10,D0[1]     ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q4            ;
+      VMUL.S32 Q10,Q14,Q4            
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q4
-      VQRDMULH.S32 Q11,Q10,D1[1]     ;
+      VQRDMULH.S32 Q11,Q10,D1[1]     
       VADD.S32 Q9,Q9,Q11
 
       VLD1.32 {D0-D1},[R10]!
@@ -791,11 +742,11 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VMUL.S32 Q10,Q13,Q5
       VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q5             ;
+      VMUL.S32 Q10,Q14,Q5             
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q5
-      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VQRDMULH.S32 Q11,Q10,D1[1]      
       VADD.S32 Q9,Q9,Q11
 
       VLD1.32 {D0-D1},[R10]!
@@ -806,11 +757,11 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VMUL.S32 Q10,Q13,Q6
       VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q6             ;
+      VMUL.S32 Q10,Q14,Q6             
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q6
-      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VQRDMULH.S32 Q11,Q10,D1[1]      
       VADD.S32 Q9,Q9,Q11
 
       VLD1.32 {D0-D1},[R10]!
@@ -821,11 +772,11 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VMUL.S32 Q10,Q13,Q7
       VQRDMULH.S32 Q11,Q10,D0[1]      ; Q11=temp2
       VADD.S32 Q9,Q9,Q11
-      VMUL.S32 Q10,Q14,Q7             ;
+      VMUL.S32 Q10,Q14,Q7             
       VQRDMULH.S32 Q11,Q10,D1[0]
       VADD.S32 Q9,Q9,Q11
       VMUL.S32 Q10,Q15,Q7
-      VQRDMULH.S32 Q11,Q10,D1[1]      ;
+      VQRDMULH.S32 Q11,Q10,D1[1]      
       VADD.S32 Q9,Q9,Q11
 
       VMOV Q3,Q9
@@ -834,25 +785,10 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VST3.32 {D3,D5,D7},[R9]
       ;ADD R9,R9,R4
 
-   ;STMFD R13!,{R1,R2}                    ; debugging stuff
-   ;CMP R1,#0
-   ;CMPEQ R2,#0
-
-   ;STREQ R9,temp4
-   ;VMOVEQ R1,R2,D18
-   ;STREQ R1,temp5
-   ;STREQ R2,temp6
-   ;VMOVEQ R1,R2,D19
-   ;STREQ R1,temp3
-   ;STREQ R2,temp4
-   ;LDMFD R13!,{R1,R2}
-   ;BEQ exit_routine
-
       SUB R10,R10,#192
       SUB R9,R9,#72                      ; ? not finished yet
       SUBS R2,R2,#4
       BNE loop_v
-
 
       ADD R9,R9,#36
 
@@ -901,7 +837,6 @@ MOV R2,R7                              ; R2 is v starting on top, R7 is not need
       VST1.32 {D6[0]},[R9]
       SUB R10,R10,#128
       SUB R9,R9,#8
-
 
       ;store something in v=0 --> x,y,z=12 bytes
       MOV R2,R7
@@ -962,7 +897,6 @@ MOV R1,R8                            ; R1 and R2, u and v counters
 MOV R2,R8                            ; starting high
 ADD R8,R8,#1                         ; number of u and v points (resolution+1)
 
-
 ; we need Rx for address of matrix, Ry for start address of object vertices and Rz for start address of rotated view
 ; vertices
 ADD R9,R12,#matrices                         ;R9=Rx
@@ -1019,10 +953,6 @@ ADD R12,R0,#bezier_rotated_view_points       ;R12=Rz      will return to main bl
 SUBS R1,R1,#1
 BPL matrix_multiply_u
 
-
-
-
-
 LDMFD R13!,{R0-R12,R15}
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;; end of object rotation ;;;;;;;;;;;;;;;;;;;;;;
 
@@ -1073,9 +1003,6 @@ VCVT.F32.U32 S8,S0                   ; S8=camera_zoom_factor
  BGE v_loop2
 SUBS R1,R1,#1
 BGE u_loop2
-
-
-
 
 LDMFD R13!,{R0-R12,R15}
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;; end of creating 2d points
@@ -1170,11 +1097,9 @@ SUB R5,R8,#2                ; R1=v-1
   ADD R7,R7,#4
   LDR R3,[R9,R7]
   STMFD R13!,{R4}
-  ;CMP R4,#1
-  ;CMPEQ R5,#1
   LDR R4,[R6,#object_color]
-  ;MOVEQ R4,#&FF
   BL line
+  
   LDMFD R13!,{R4}
   ADD R5,R5,#1
   MLA R10,R8,R4,R5         ; R10 = offset address (u,v) from bezier_screen_data (R9)
@@ -1205,17 +1130,11 @@ MOV R9,#3                             ; counter x
 MOV R8,#3                             ; counter y
 
 .loop_x
-
-.loop_y
-
-
-
-
- SUBS R8,R8,#1
+ .loop_y
+  SUBS R8,R8,#1
  BGE loop_y
-SUBS R9,R9,#1
+ SUBS R9,R9,#1
 BGE loop_x
-
 
 LDMFD R13!,{R0-R12,R15}
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; end of drawing bezier control points ;;;;;;;;
@@ -1384,48 +1303,6 @@ BNE CLSloop
 LDMFD R13!,{R0-R12,R15}       ;return to main
 ;;;;;;;;;;;;;;;;;;;;;; end of clear screen ;;;;;;;;;;;;;;;;;;;
 
-
-
-.animation_counter
-EQUD 100
-.temp
-EQUD 0
-.temp1
-EQUD 0
-.temp2
-EQUD 0
-.temp3
-EQUD 0
-.temp4
-EQUD 0
-.temp5
-EQUD 0
-.temp6
-EQUD 0
-.temp7
-EQUD 0
-.temp8
-EQUD 0
-.temp9
-EQUD 0
-.temp10
-EQUD 0
-.temp11
-EQUD 0
-.temp12
-EQUD 0
-.temp13
-EQUD 0
-.temp14
-EQUD 0
-.temp15
-EQUD 0
-.temp16
-EQUD 0
-
-
-
-
 ]
 NEXT pass
 
@@ -1434,89 +1311,4 @@ B%=stack%
 TIME=0
 CALL code%
 PRINT TIME
-
 END
-A=GET
-MODE 1920,1080,32
-REM PRINT ~!temp1,~!temp2,~!temp3,~!temp4
-PRINT !temp5,!temp6,!temp7
-
-REM Adres%=block%+!(block%+first_object_address)+bezier_points
-REM PRINT ~Adres%
-
-
-REM FOR U%=0 TO 32
-REM FOR V%=0 TO 32
-REM
-REM MOVE V%*100+50,U%*30+650
-REM A%=U%*33*12+V%*12
-REM B%=!(Adres%+A%+4)
-REM PRINT B%
-REM NEXT
-REM NEXT
-REM END
-
-
-  COLOUR 255,255,255
-
-
-PROCDraw_Table(block%+Buv,16,8)
-REM PROC_Draw_Table(Adres,16,96)
-
-END
-
-
-
-DEF PROCDraw_Table(Address%,Stride%,Number%)
-  LOCAL A%,B%,Toggle%
-  Toggle%=0
-
-  PRINT
-  FOR B%=0 TO Stride%
-   PRINT ~B%;
-  NEXT
-  PRINT '
-
-
-
-  FOR A%=0 TO 4*Stride%*Number% STEP 4*Stride%
-    COLOUR 255,255-128*Toggle%,255
-    PRINT A%DIVStride%;
-    FOR B%=0 TO Stride%-1
-      PRINT ~!(Address%+(A%)+(B%*4));
-    NEXT
-    PRINT
-    Toggle%=Toggle%EOR1
-  NEXT
-
-ENDPROC
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
