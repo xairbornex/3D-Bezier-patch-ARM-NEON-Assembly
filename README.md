@@ -33,5 +33,7 @@ All the rest is clean assembly with mnemonics that are indentical in other and n
 **********************************************************************************************************************
 The core code set up and discription
 
-
+1. Memory
+   All variables and data are being framed in just one big block of reserved memory. The start address of that block is the base reference to all variables and data.
+   In the first section, names of variables are being given a sequential number with multiplyer 4. Moste of those variables are used in the program as memory location that holds an address where all of the related data is stored. When porting the algorithms, any kind of memory/variable setup can be choosen. I just made an effort to  
 more to follow
